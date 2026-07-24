@@ -25,18 +25,20 @@
 #define BUFFER_SIZE 8192
 
 // ============================================================================
-// 配置结构体（与 Go 版环境变量对齐）
+// 配置结构体（所有参数均从环境变量读取）
 // ============================================================================
 typedef struct {
     char uuid[37];
     char cfip[64];
     char cfport[8];
-    int  proxy_port;          // VLESS/Trojan 代理端口（来自 ARGO_PORT）
-    int  sub_port;            // HTTP 服务端口（来自 RELAY_PORT）
-    char sub_path[32];        // 订阅路径（来自 SUB_PATH，默认 "sub"）
+    char proxy_bind[32];      // 代理监听地址（默认 127.0.0.1）
+    int  proxy_port;          // 代理监听端口（默认 8001）
+    char sub_bind[32];        // 订阅监听地址（默认 0.0.0.0）
+    int  sub_port;            // 订阅监听端口（默认 7860）
+    char sub_path[32];        // 订阅路径（默认 "sub"）
     char argo_auth[2048];
     char argo_domain[256];
-    char node_name[64];       // 节点名称（来自 NAME）
+    char node_name[64];
 } RelayConfig;
 
 static RelayConfig config;
@@ -47,27 +49,41 @@ static const char* get_env(const char *key, const char *default_val) {
 }
 
 static void init_config() {
+    // 字符串字段
     strncpy(config.uuid, get_env("UUID", "4a0636f4-4514-47f4-87f7-2f1967289758"), sizeof(config.uuid)-1);
     config.uuid[sizeof(config.uuid)-1] = '\0';
+
     strncpy(config.cfip, get_env("CFIP", "23.227.38.65"), sizeof(config.cfip)-1);
     config.cfip[sizeof(config.cfip)-1] = '\0';
+
     strncpy(config.cfport, get_env("CFPORT", "443"), sizeof(config.cfport)-1);
     config.cfport[sizeof(config.cfport)-1] = '\0';
-    strncpy(config.argo_auth, get_env("ARGO_AUTH", "eyJhIjoiNWRmNTFlZjhhMTNiMWQ1ZDFhODhhZTAxNWFmYTU5OGIiLCJ0IjoiOTBlYWNkYmYtODE1ZS00N2JjLWJhNTAtOGQ0NjIzMWY1N2UwIiwicyI6Ik1qazRNREF5TUdVdE5ETXhaaTAwWlRJNUxUaGxObVV0WldZeFlXWmxOemMyTmpnMyJ9"), sizeof(config.argo_auth)-1);
-    config.argo_auth[sizeof(config.argo_auth)-1] = '\0';
-    strncpy(config.argo_domain, get_env("ARGO_DOMAIN", "gocfvps.rboya.indevs.in"), sizeof(config.argo_domain)-1);
-    config.argo_domain[sizeof(config.argo_domain)-1] = '\0';
-    strncpy(config.node_name, get_env("NAME", "Argo"), sizeof(config.node_name)-1);
-    config.node_name[sizeof(config.node_name)-1] = '\0';
+
+    strncpy(config.proxy_bind, get_env("PROXY_BIND", "127.0.0.1"), sizeof(config.proxy_bind)-1);
+    config.proxy_bind[sizeof(config.proxy_bind)-1] = '\0';
+
+    strncpy(config.sub_bind, get_env("SUB_BIND", "0.0.0.0"), sizeof(config.sub_bind)-1);
+    config.sub_bind[sizeof(config.sub_bind)-1] = '\0';
+
     strncpy(config.sub_path, get_env("SUB_PATH", "sub"), sizeof(config.sub_path)-1);
     config.sub_path[sizeof(config.sub_path)-1] = '\0';
 
-    const char *proxy = get_env("ARGO_PORT", "8001");
-    config.proxy_port = atoi(proxy);
+    strncpy(config.argo_auth, get_env("ARGO_AUTH", "eyJhIjoiNWRmNTFlZjhhMTNiMWQ1ZDFhODhhZTAxNWFmYTU5OGIiLCJ0IjoiOTBlYWNkYmYtODE1ZS00N2JjLWJhNTAtOGQ0NjIzMWY1N2UwIiwicyI6Ik1qazRNREF5TUdVdE5ETXhaaTAwWlRJNUxUaGxObVV0WldZeFlXWmxOemMyTmpnMyJ9"), sizeof(config.argo_auth)-1);
+    config.argo_auth[sizeof(config.argo_auth)-1] = '\0';
+
+    strncpy(config.argo_domain, get_env("ARGO_DOMAIN", "gocfvps.rboya.indevs.in"), sizeof(config.argo_domain)-1);
+    config.argo_domain[sizeof(config.argo_domain)-1] = '\0';
+
+    strncpy(config.node_name, get_env("NAME", "Argo"), sizeof(config.node_name)-1);
+    config.node_name[sizeof(config.node_name)-1] = '\0';
+
+    // 数字字段
+    const char *proxy_port_str = get_env("PROXY_PORT", "8001");
+    config.proxy_port = atoi(proxy_port_str);
     if (config.proxy_port <= 0) config.proxy_port = 8001;
 
-    const char *sub = get_env("RELAY_PORT", "7860");
-    config.sub_port = atoi(sub);
+    const char *sub_port_str = get_env("SUB_PORT", "7860");
+    config.sub_port = atoi(sub_port_str);
     if (config.sub_port <= 0) config.sub_port = 7860;
 }
 
@@ -517,7 +533,7 @@ static void handle_sub_accept(int listen_fd) {
 }
 
 // ============================================================================
-// Argo 隧道管理（含自动下载）
+// Argo 隧道管理（含自动下载 cloudflared）
 // ============================================================================
 static pid_t argo_pid = -1;
 static char argo_domain[256] = {0};
@@ -744,10 +760,10 @@ static void generate_subscription(const char *domain) {
 static int argo_run() {
     if (config.argo_auth[0] && config.argo_domain[0]) {
         fprintf(stderr, "Using fixed tunnel: %s\n", config.argo_domain);
-        // 即使隧道配置或启动失败，也先生成订阅（因为域名已知）
+        // 先写入订阅（即使隧道未启动，域名已知）
         strncpy(argo_domain, config.argo_domain, sizeof(argo_domain)-1);
         argo_domain[sizeof(argo_domain)-1] = '\0';
-        generate_subscription(argo_domain);   // 先生成，确保文件存在
+        generate_subscription(argo_domain);
 
         if (generate_tunnel_config(config.argo_auth, config.argo_domain) != 0) {
             fprintf(stderr, "Failed to generate tunnel config\n");
@@ -802,6 +818,7 @@ static void sigchld_handler(int sig) {
 
 int main(int argc, char **argv) {
     init_config();
+
     if (parse_uuid(config.uuid) != 0) {
         fprintf(stderr, "Invalid UUID, using default.\n");
         strcpy(config.uuid, "00000000-0000-4000-8000-000000000000");
@@ -813,38 +830,50 @@ int main(int argc, char **argv) {
     signal(SIGTERM, handle_signal);
     signal(SIGCHLD, sigchld_handler);
 
-    // ---------- 代理监听 socket (ARGO_PORT) ----------
+    // ---------- 代理监听 socket (PROXY_BIND:PROXY_PORT) ----------
     proxy_listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (proxy_listen_fd < 0) { perror("proxy socket"); return 1; }
     int opt = 1;
     setsockopt(proxy_listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
+    if (inet_pton(AF_INET, config.proxy_bind, &addr.sin_addr) <= 0) {
+        fprintf(stderr, "Invalid PROXY_BIND address: %s\n", config.proxy_bind);
+        return 1;
+    }
     addr.sin_port = htons(config.proxy_port);
     if (bind(proxy_listen_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        perror("proxy bind"); return 1;
+        perror("proxy bind");
+        return 1;
     }
     if (listen(proxy_listen_fd, SOMAXCONN) < 0) {
-        perror("proxy listen"); return 1;
+        perror("proxy listen");
+        return 1;
     }
     set_nonblock(proxy_listen_fd);
 
-    // ---------- 订阅监听 socket (RELAY_PORT) ----------
+    // ---------- 订阅监听 socket (SUB_BIND:SUB_PORT) ----------
     sub_listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (sub_listen_fd < 0) { perror("sub socket"); return 1; }
     setsockopt(sub_listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
     struct sockaddr_in sub_addr;
     memset(&sub_addr, 0, sizeof(sub_addr));
     sub_addr.sin_family = AF_INET;
-    sub_addr.sin_addr.s_addr = INADDR_ANY;
+    if (inet_pton(AF_INET, config.sub_bind, &sub_addr.sin_addr) <= 0) {
+        fprintf(stderr, "Invalid SUB_BIND address: %s\n", config.sub_bind);
+        return 1;
+    }
     sub_addr.sin_port = htons(config.sub_port);
     if (bind(sub_listen_fd, (struct sockaddr*)&sub_addr, sizeof(sub_addr)) < 0) {
-        perror("sub bind"); return 1;
+        perror("sub bind");
+        return 1;
     }
     if (listen(sub_listen_fd, SOMAXCONN) < 0) {
-        perror("sub listen"); return 1;
+        perror("sub listen");
+        return 1;
     }
     set_nonblock(sub_listen_fd);
 
@@ -863,10 +892,10 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Argo startup failed, but relay continues.\n");
     }
 
-    printf("Proxy (VLESS/Trojan) listening on port %d\n", config.proxy_port);
-    printf("HTTP server on port %d\n", config.sub_port);
-    printf("  - /  -> 302 redirect to https://doh.goyo123.work.gd/\n");
-    printf("  - /%s -> Base64 encoded subscription\n", config.sub_path);
+    printf("Proxy (VLESS/Trojan) listening on %s:%d\n", config.proxy_bind, config.proxy_port);
+    printf("Subscription HTTP server on %s:%d (path /%s)\n",
+           config.sub_bind, config.sub_port, config.sub_path);
+    printf("  - / -> 302 redirect to https://doh.goyo123.work.gd/\n");
 
     struct epoll_event events[MAX_EVENTS];
     while (running) {
