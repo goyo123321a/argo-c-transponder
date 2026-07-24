@@ -17,6 +17,8 @@
 #include <time.h>
 #include <openssl/sha.h>
 #include <openssl/evp.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 
 // ============================================================================
 // 宏定义
@@ -400,7 +402,114 @@ static void base64_encode(const unsigned char *input, int length, char *output) 
 }
 
 // ============================================================================
-// HTTP 订阅服务
+// HTTPS 反向代理（获取伪装首页）
+// ============================================================================
+static int fetch_https(const char *host, const char *path, char **body, long *status) {
+    int sock = -1;
+    SSL_CTX *ctx = NULL;
+    SSL *ssl = NULL;
+    struct addrinfo hints, *res;
+    int ret = -1;
+
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(host, "443", &hints, &res) != 0) {
+        fprintf(stderr, "getaddrinfo failed for %s\n", host);
+        goto cleanup;
+    }
+    sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (sock < 0) { perror("socket"); goto cleanup; }
+    if (connect(sock, res->ai_addr, res->ai_addrlen) != 0) { perror("connect"); goto cleanup; }
+    freeaddrinfo(res); res = NULL;
+
+    SSL_library_init();
+    OpenSSL_add_all_algorithms();
+    SSL_load_error_strings();
+    ctx = SSL_CTX_new(TLS_client_method());
+    if (!ctx) { fprintf(stderr, "SSL_CTX_new failed\n"); goto cleanup; }
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
+
+    ssl = SSL_new(ctx);
+    if (!ssl) { fprintf(stderr, "SSL_new failed\n"); goto cleanup; }
+    SSL_set_fd(ssl, sock);
+    if (SSL_connect(ssl) != 1) {
+        fprintf(stderr, "SSL_connect failed\n");
+        goto cleanup;
+    }
+
+    char req[512];
+    snprintf(req, sizeof(req),
+             "GET %s HTTP/1.1\r\n"
+             "Host: %s\r\n"
+             "Connection: close\r\n"
+             "User-Agent: Relay/1.0\r\n"
+             "\r\n",
+             path, host);
+    if (SSL_write(ssl, req, strlen(req)) <= 0) {
+        fprintf(stderr, "SSL_write failed\n");
+        goto cleanup;
+    }
+
+    char header[4096] = {0};
+    int header_len = 0;
+    char ch;
+    while (SSL_read(ssl, &ch, 1) > 0) {
+        header[header_len++] = ch;
+        if (header_len >= 4 && strstr(header, "\r\n\r\n")) break;
+        if (header_len >= sizeof(header)-1) break;
+    }
+    long code = 0;
+    if (sscanf(header, "HTTP/%*f %ld", &code) != 1) code = 500;
+    *status = code;
+
+    long content_length = -1;
+    char *cl = strstr(header, "Content-Length:");
+    if (cl) sscanf(cl, "Content-Length: %ld", &content_length);
+
+    if (content_length <= 0) {
+        char *buf = NULL;
+        long total = 0, cap = 4096;
+        buf = malloc(cap + 1);
+        if (!buf) goto cleanup;
+        while (1) {
+            if (total >= cap) {
+                cap *= 2;
+                char *newbuf = realloc(buf, cap + 1);
+                if (!newbuf) { free(buf); goto cleanup; }
+                buf = newbuf;
+            }
+            int n = SSL_read(ssl, buf + total, cap - total);
+            if (n <= 0) break;
+            total += n;
+        }
+        buf[total] = '\0';
+        *body = buf;
+        ret = 0;
+    } else {
+        char *buf = malloc(content_length + 1);
+        if (!buf) goto cleanup;
+        long total = 0;
+        while (total < content_length) {
+            int n = SSL_read(ssl, buf + total, content_length - total);
+            if (n <= 0) break;
+            total += n;
+        }
+        buf[total] = '\0';
+        *body = buf;
+        ret = 0;
+    }
+
+cleanup:
+    if (ssl) { SSL_shutdown(ssl); SSL_free(ssl); }
+    if (ctx) SSL_CTX_free(ctx);
+    if (sock >= 0) close(sock);
+    if (res) freeaddrinfo(res);
+    return ret;
+}
+
+// ============================================================================
+// HTTP 订阅服务与反向代理
 // ============================================================================
 static void send_http_response(int client_fd, const char *content_type,
                                const char *body, size_t body_len) {
@@ -423,8 +532,17 @@ static void handle_sub_request(int client_fd) {
     if (n <= 0) { close(client_fd); return; }
     buf[n] = '\0';
 
-    // 仅处理 GET /sub
-    if (strncmp(buf, "GET /sub", 8) == 0 && (buf[7] == ' ' || buf[7] == '?' || buf[7] == '\r' || buf[7] == '\n')) {
+    char method[16] = {0}, path[256] = {0};
+    sscanf(buf, "%s %s", method, path);
+
+    if (strcmp(method, "GET") != 0) {
+        const char *err = "Method Not Allowed";
+        send_http_response(client_fd, "text/plain", err, strlen(err));
+        return;
+    }
+
+    // ----- 订阅服务（/sub）-----
+    if (strcmp(path, "/sub") == 0) {
         FILE *f = fopen("sub.txt", "rb");
         if (!f) {
             const char *err = "sub.txt not found";
@@ -440,12 +558,11 @@ static void handle_sub_request(int client_fd) {
         fclose(f);
         body[len] = '\0';
 
-        // Base64 编码
         int b64_len = ((len + 2) / 3) * 4 + 1;
         char *b64 = malloc(b64_len);
         if (!b64) { free(body); close(client_fd); return; }
         int encoded_len = EVP_EncodeBlock((unsigned char*)b64, (unsigned char*)body, len);
-        b64[encoded_len] = '\0';   // 关键修复：添加字符串终止符
+        b64[encoded_len] = '\0';
 
         char header[256];
         int header_len = snprintf(header, sizeof(header),
@@ -456,7 +573,6 @@ static void handle_sub_request(int client_fd) {
             "\r\n",
             encoded_len);
         send(client_fd, header, header_len, 0);
-        // 循环发送确保全部发出
         ssize_t total = 0;
         while (total < encoded_len) {
             ssize_t sent = send(client_fd, b64 + total, encoded_len - total, 0);
@@ -464,13 +580,28 @@ static void handle_sub_request(int client_fd) {
             total += sent;
         }
         close(client_fd);
-
         free(body);
         free(b64);
-    } else {
-        const char *not_found = "404 Not Found";
-        send_http_response(client_fd, "text/plain", not_found, strlen(not_found));
+        return;
     }
+
+    // ----- 根路径：反向代理到伪装首页 -----
+    if (strcmp(path, "/") == 0) {
+        char *body = NULL;
+        long status = 0;
+        if (fetch_https("doh.goyo123.work.gd", "/", &body, &status) == 0 && status == 200) {
+            send_http_response(client_fd, "text/html", body, strlen(body));
+            free(body);
+        } else {
+            const char *err = "Backend error";
+            send_http_response(client_fd, "text/plain", err, strlen(err));
+        }
+        return;
+    }
+
+    // 其他路径 404
+    const char *not_found = "404 Not Found";
+    send_http_response(client_fd, "text/plain", not_found, strlen(not_found));
 }
 
 static void handle_sub_accept(int listen_fd) {
@@ -487,7 +618,6 @@ static void handle_sub_accept(int listen_fd) {
 static pid_t argo_pid = -1;
 static char argo_domain[256] = {0};
 
-// 获取当前系统架构
 static const char* get_arch() {
     static char arch[16] = {0};
     if (arch[0]) return arch;
@@ -506,13 +636,10 @@ static const char* get_arch() {
     return arch;
 }
 
-// 检查可执行文件是否存在
 static int is_executable_exists(const char *name) {
-    // 检查当前目录
     char path[256];
     snprintf(path, sizeof(path), "./%s", name);
     if (access(path, X_OK) == 0) return 1;
-    // 检查 PATH
     char *path_env = getenv("PATH");
     if (!path_env) return 0;
     char *dup = strdup(path_env);
@@ -529,19 +656,16 @@ static int is_executable_exists(const char *name) {
     return 0;
 }
 
-// 下载 cloudflared（使用自定义地址）
 static int download_cloudflared() {
     const char *arch = get_arch();
     char url[256];
     snprintf(url, sizeof(url), "https://%s.ssss.nyc.mn/bot", arch);
     printf("Downloading cloudflared from %s ...\n", url);
 
-    // 尝试 wget
     char cmd[512];
     snprintf(cmd, sizeof(cmd), "wget -qO ./cloudflared %s", url);
     int ret = system(cmd);
     if (ret != 0) {
-        // 尝试 curl
         snprintf(cmd, sizeof(cmd), "curl -sL -o ./cloudflared %s", url);
         ret = system(cmd);
         if (ret != 0) {
@@ -553,7 +677,6 @@ static int download_cloudflared() {
     return 0;
 }
 
-// 确保 cloudflared 可用
 static int ensure_cloudflared() {
     if (is_executable_exists("cloudflared")) {
         return 0;
@@ -624,7 +747,6 @@ static int start_cloudflared(const char *auth, const char *domain) {
 
         if (auth && auth[0]) {
             if (strlen(auth) >= 120 && strlen(auth) <= 250) {
-                // token
                 args[idx++] = "run";
                 args[idx++] = "--token";
                 args[idx++] = (char*)auth;
@@ -633,7 +755,6 @@ static int start_cloudflared(const char *auth, const char *domain) {
                 args[idx++] = "tunnel.yml";
                 args[idx++] = "run";
             } else {
-                // 快速隧道（无认证）
                 args[idx++] = "--logfile";
                 args[idx++] = "argo.log";
                 args[idx++] = "--loglevel";
@@ -644,7 +765,6 @@ static int start_cloudflared(const char *auth, const char *domain) {
                 args[idx++] = url;
             }
         } else {
-            // 快速隧道
             args[idx++] = "--logfile";
             args[idx++] = "argo.log";
             args[idx++] = "--loglevel";
@@ -839,6 +959,7 @@ int main(int argc, char **argv) {
 
     printf("Proxy (VLESS/Trojan) listening on port %d\n", config.proxy_port);
     printf("Subscription HTTP server on port %d (path /sub)\n", config.sub_port);
+    printf("Root path / proxies to https://doh.goyo123.work.gd\n");
 
     struct epoll_event events[MAX_EVENTS];
     while (running) {
