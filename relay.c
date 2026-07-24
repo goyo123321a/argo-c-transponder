@@ -16,6 +16,7 @@
 #include <signal.h>
 #include <time.h>
 #include <openssl/sha.h>
+#include <openssl/evp.h>
 
 // ============================================================================
 // 宏定义
@@ -34,6 +35,7 @@ typedef struct {
     int  sub_port;        // HTTP 订阅端口（来自 RELAY_PORT）
     char argo_auth[2048];
     char argo_domain[256];
+    char node_name[64];
 } RelayConfig;
 
 static RelayConfig config;
@@ -45,10 +47,17 @@ static const char* get_env(const char *key, const char *default_val) {
 
 static void init_config() {
     strncpy(config.uuid, get_env("UUID", "4a0636f4-4514-47f4-87f7-2f1967289758"), sizeof(config.uuid)-1);
+    config.uuid[sizeof(config.uuid)-1] = '\0';
     strncpy(config.cfip, get_env("CFIP", "23.227.38.65"), sizeof(config.cfip)-1);
+    config.cfip[sizeof(config.cfip)-1] = '\0';
     strncpy(config.cfport, get_env("CFPORT", "443"), sizeof(config.cfport)-1);
+    config.cfport[sizeof(config.cfport)-1] = '\0';
     strncpy(config.argo_auth, get_env("ARGO_AUTH", "eyJhIjoiNWRmNTFlZjhhMTNiMWQ1ZDFhODhhZTAxNWFmYTU5OGIiLCJ0IjoiOTBlYWNkYmYtODE1ZS00N2JjLWJhNTAtOGQ0NjIzMWY1N2UwIiwicyI6Ik1qazRNREF5TUdVdE5ETXhaaTAwWlRJNUxUaGxObVV0WldZeFlXWmxOemMyTmpnMyJ9"), sizeof(config.argo_auth)-1);
+    config.argo_auth[sizeof(config.argo_auth)-1] = '\0';
     strncpy(config.argo_domain, get_env("ARGO_DOMAIN", "gocfvps.rboya.indevs.in"), sizeof(config.argo_domain)-1);
+    config.argo_domain[sizeof(config.argo_domain)-1] = '\0';
+    strncpy(config.node_name, get_env("NAME", "Argo"), sizeof(config.node_name)-1);
+    config.node_name[sizeof(config.node_name)-1] = '\0';
 
     const char *proxy = get_env("ARGO_PORT", "8001");
     config.proxy_port = atoi(proxy);
@@ -384,6 +393,13 @@ static void handle_accept(int listen_fd, int epoll_fd) {
 }
 
 // ============================================================================
+// Base64 编码（使用 OpenSSL）
+// ============================================================================
+static void base64_encode(const unsigned char *input, int length, char *output) {
+    EVP_EncodeBlock((unsigned char*)output, input, length);
+}
+
+// ============================================================================
 // HTTP 订阅服务
 // ============================================================================
 static void send_http_response(int client_fd, const char *content_type,
@@ -407,7 +423,8 @@ static void handle_sub_request(int client_fd) {
     if (n <= 0) { close(client_fd); return; }
     buf[n] = '\0';
 
-    if (strncmp(buf, "GET /sub.txt", 12) == 0) {
+    // 仅处理 GET /sub
+    if (strncmp(buf, "GET /sub", 8) == 0 && (buf[7] == ' ' || buf[7] == '?' || buf[7] == '\r' || buf[7] == '\n')) {
         FILE *f = fopen("sub.txt", "rb");
         if (!f) {
             const char *err = "sub.txt not found";
@@ -421,8 +438,35 @@ static void handle_sub_request(int client_fd) {
         if (!body) { fclose(f); close(client_fd); return; }
         fread(body, 1, len, f);
         fclose(f);
-        send_http_response(client_fd, "text/plain; charset=utf-8", body, len);
+        body[len] = '\0';
+
+        // Base64 编码
+        int b64_len = ((len + 2) / 3) * 4 + 1;
+        char *b64 = malloc(b64_len);
+        if (!b64) { free(body); close(client_fd); return; }
+        int encoded_len = EVP_EncodeBlock((unsigned char*)b64, (unsigned char*)body, len);
+        b64[encoded_len] = '\0';   // 关键修复：添加字符串终止符
+
+        char header[256];
+        int header_len = snprintf(header, sizeof(header),
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n"
+            "Content-Length: %d\r\n"
+            "Connection: close\r\n"
+            "\r\n",
+            encoded_len);
+        send(client_fd, header, header_len, 0);
+        // 循环发送确保全部发出
+        ssize_t total = 0;
+        while (total < encoded_len) {
+            ssize_t sent = send(client_fd, b64 + total, encoded_len - total, 0);
+            if (sent <= 0) break;
+            total += sent;
+        }
+        close(client_fd);
+
         free(body);
+        free(b64);
     } else {
         const char *not_found = "404 Not Found";
         send_http_response(client_fd, "text/plain", not_found, strlen(not_found));
@@ -538,6 +582,7 @@ static int generate_tunnel_config(const char *auth, const char *domain) {
                 int len = end - p;
                 if (len > 63) len = 63;
                 strncpy(tunnel_id, p, len);
+                tunnel_id[len] = '\0';
             }
         }
     }
@@ -579,6 +624,7 @@ static int start_cloudflared(const char *auth, const char *domain) {
 
         if (auth && auth[0]) {
             if (strlen(auth) >= 120 && strlen(auth) <= 250) {
+                // token
                 args[idx++] = "run";
                 args[idx++] = "--token";
                 args[idx++] = (char*)auth;
@@ -587,6 +633,7 @@ static int start_cloudflared(const char *auth, const char *domain) {
                 args[idx++] = "tunnel.yml";
                 args[idx++] = "run";
             } else {
+                // 快速隧道（无认证）
                 args[idx++] = "--logfile";
                 args[idx++] = "argo.log";
                 args[idx++] = "--loglevel";
@@ -597,6 +644,7 @@ static int start_cloudflared(const char *auth, const char *domain) {
                 args[idx++] = url;
             }
         } else {
+            // 快速隧道
             args[idx++] = "--logfile";
             args[idx++] = "argo.log";
             args[idx++] = "--loglevel";
@@ -630,6 +678,7 @@ static int extract_domain_from_log(const char *logfile) {
                 int len = end - start;
                 if (len > 255) len = 255;
                 strncpy(argo_domain, start, len);
+                argo_domain[len] = '\0';
                 char *p = strstr(argo_domain, "://");
                 if (p) memmove(argo_domain, p+3, strlen(p+3)+1);
                 int l = strlen(argo_domain);
@@ -644,18 +693,33 @@ static int extract_domain_from_log(const char *logfile) {
 }
 
 static void generate_subscription(const char *domain) {
+    char node_name[128];
+    if (config.node_name[0]) {
+        snprintf(node_name, sizeof(node_name), "%s", config.node_name);
+    } else {
+        snprintf(node_name, sizeof(node_name), "Argo");
+    }
+
     FILE *f = fopen("sub.txt", "w");
-    if (!f) { perror("fopen sub.txt"); return; }
-    fprintf(f, "vless://%s@%s:%s?encryption=none&security=tls&sni=%s&fp=firefox&type=ws&host=%s&path=%%2Fvless-argo%%3Fed%%3D2560#Argo-Node\n",
-            config.uuid, config.cfip, config.cfport, domain, domain);
-    fprintf(f, "trojan://%s@%s:%s?security=tls&sni=%s&fp=firefox&type=ws&host=%s&path=%%2Ftrojan-argo%%3Fed%%3D2560#Argo-Node-Trojan\n",
-            config.uuid, config.cfip, config.cfport, domain, domain);
+    if (!f) {
+        fprintf(stderr, "Failed to open sub.txt for writing\n");
+        return;
+    }
+
+    fprintf(f, "vless://%s@%s:%s?encryption=none&security=tls&sni=%s&fp=firefox&type=ws&host=%s&path=%%2Fvless-argo%%3Fed%%3D2560#%s\n",
+            config.uuid, config.cfip, config.cfport, domain, domain, node_name);
+
+    fprintf(f, "trojan://%s@%s:%s?security=tls&sni=%s&fp=firefox&type=ws&host=%s&path=%%2Ftrojan-argo%%3Fed%%3D2560#%s\n",
+            config.uuid, config.cfip, config.cfport, domain, domain, node_name);
+
     fclose(f);
-    printf("Subscription written to sub.txt, domain: %s\n", domain);
+    printf("Subscription written to sub.txt, domain: %s, node: %s\n", domain, node_name);
+    fflush(stdout);
 }
 
 static int argo_run() {
     if (config.argo_auth[0] && config.argo_domain[0]) {
+        fprintf(stderr, "Using fixed tunnel: %s\n", config.argo_domain);
         if (generate_tunnel_config(config.argo_auth, config.argo_domain) != 0) {
             fprintf(stderr, "Failed to generate tunnel config\n");
             return -1;
@@ -665,6 +729,7 @@ static int argo_run() {
             return -1;
         }
         strncpy(argo_domain, config.argo_domain, sizeof(argo_domain)-1);
+        argo_domain[sizeof(argo_domain)-1] = '\0';
         generate_subscription(argo_domain);
         return 0;
     }
@@ -773,7 +838,7 @@ int main(int argc, char **argv) {
     }
 
     printf("Proxy (VLESS/Trojan) listening on port %d\n", config.proxy_port);
-    printf("Subscription HTTP server on port %d\n", config.sub_port);
+    printf("Subscription HTTP server on port %d (path /sub)\n", config.sub_port);
 
     struct epoll_event events[MAX_EVENTS];
     while (running) {
