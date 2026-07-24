@@ -47,8 +47,8 @@ static void init_config() {
     strncpy(config.uuid, get_env("UUID", "4a0636f4-4514-47f4-87f7-2f1967289758"), sizeof(config.uuid)-1);
     strncpy(config.cfip, get_env("CFIP", "23.227.38.65"), sizeof(config.cfip)-1);
     strncpy(config.cfport, get_env("CFPORT", "443"), sizeof(config.cfport)-1);
-    strncpy(config.argo_auth, get_env("ARGO_AUTH", "gocfvps.rboya.indevs.in"), sizeof(config.argo_auth)-1);
-    strncpy(config.argo_domain, get_env("ARGO_DOMAIN", "eyJhIjoiNWRmNTFlZjhhMTNiMWQ1ZDFhODhhZTAxNWFmYTU5OGIiLCJ0IjoiOTBlYWNkYmYtODE1ZS00N2JjLWJhNTAtOGQ0NjIzMWY1N2UwIiwicyI6Ik1qazRNREF5TUdVdE5ETXhaaTAwWlRJNUxUaGxObVV0WldZeFlXWmxOemMyTmpnMyJ9"), sizeof(config.argo_domain)-1);
+    strncpy(config.argo_auth, get_env("ARGO_AUTH", "eyJhIjoiNWRmNTFlZjhhMTNiMWQ1ZDFhODhhZTAxNWFmYTU5OGIiLCJ0IjoiOTBlYWNkYmYtODE1ZS00N2JjLWJhNTAtOGQ0NjIzMWY1N2UwIiwicyI6Ik1qazRNREF5TUdVdE5ETXhaaTAwWlRJNUxUaGxObVV0WldZeFlXWmxOemMyTmpnMyJ9"), sizeof(config.argo_auth)-1);
+    strncpy(config.argo_domain, get_env("ARGO_DOMAIN", "gocfvps.rboya.indevs.in"), sizeof(config.argo_domain)-1);
 
     const char *proxy = get_env("ARGO_PORT", "8001");
     config.proxy_port = atoi(proxy);
