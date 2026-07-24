@@ -18,6 +18,12 @@
 #include <openssl/sha.h>
 
 // ============================================================================
+// 宏定义
+// ============================================================================
+#define MAX_EVENTS 1024
+#define BUFFER_SIZE 8192
+
+// ============================================================================
 // 配置结构体与环境变量
 // ============================================================================
 typedef struct {
@@ -483,7 +489,6 @@ static int is_executable_exists(const char *name) {
 static int download_cloudflared() {
     const char *arch = get_arch();
     char url[256];
-    // 替换为 Go 版使用的自定义地址
     snprintf(url, sizeof(url), "https://%s.ssss.nyc.mn/bot", arch);
     printf("Downloading cloudflared from %s ...\n", url);
 
