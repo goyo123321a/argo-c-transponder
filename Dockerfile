@@ -1,14 +1,14 @@
 # ============================================================
-# 第一阶段：编译 relay（静态链接，减小依赖）
+# 第一阶段：编译 relay（静态链接）
 # ============================================================
 FROM alpine:3.20 AS builder
 
-RUN apk add --no-cache gcc musl-dev openssl-dev
+RUN apk add --no-cache gcc musl-dev openssl-dev openssl-libs-static
 
 WORKDIR /build
 COPY relay.c .
 
-# 静态编译（无需运行时 OpenSSL 动态库）
+# 静态编译，并指定库路径（若需要）
 RUN gcc -O2 -Wall -static -o relay relay.c -lssl -lcrypto
 
 # ============================================================
@@ -16,10 +16,8 @@ RUN gcc -O2 -Wall -static -o relay relay.c -lssl -lcrypto
 # ============================================================
 FROM alpine:3.20
 
-# 安装 ca-certificates（用于 cloudflared HTTPS 连接）
 RUN apk add --no-cache ca-certificates
 
-# 安装 cloudflared（根据架构自动选择）
 ARG TARGETARCH
 RUN if [ "$TARGETARCH" = "arm64" ]; then \
         CLOUDARCH="arm64"; \
@@ -30,15 +28,13 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then \
     "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CLOUDARCH}" && \
     chmod +x /usr/local/bin/cloudflared
 
-# 复制编译好的 relay
 COPY --from=builder /build/relay /usr/local/bin/relay
 
-# 创建非 root 用户（提高安全性）
 RUN adduser -D -u 1000 relayuser
 USER relayuser
 
 WORKDIR /app
 
-EXPOSE 7860 3000
+EXPOSE 7860 8001
 
 CMD ["relay"]
