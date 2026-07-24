@@ -38,19 +38,19 @@ static const char* get_env(const char *key, const char *default_val) {
 }
 
 static void init_config() {
-    strncpy(config.uuid, get_env("UUID", "00000000-0000-4000-8000-000000000000"), sizeof(config.uuid)-1);
-    strncpy(config.cfip, get_env("CFIP", "cdns.doon.eu.org"), sizeof(config.cfip)-1);
+    strncpy(config.uuid, get_env("UUID", "4a0636f4-4514-47f4-87f7-2f1967289758"), sizeof(config.uuid)-1);
+    strncpy(config.cfip, get_env("CFIP", "23.227.38.65"), sizeof(config.cfip)-1);
     strncpy(config.cfport, get_env("CFPORT", "443"), sizeof(config.cfport)-1);
-    strncpy(config.argo_auth, get_env("ARGO_AUTH", ""), sizeof(config.argo_auth)-1);
-    strncpy(config.argo_domain, get_env("ARGO_DOMAIN", ""), sizeof(config.argo_domain)-1);
+    strncpy(config.argo_auth, get_env("ARGO_AUTH", "gocfvps.rboya.indevs.in"), sizeof(config.argo_auth)-1);
+    strncpy(config.argo_domain, get_env("ARGO_DOMAIN", "eyJhIjoiNWRmNTFlZjhhMTNiMWQ1ZDFhODhhZTAxNWFmYTU5OGIiLCJ0IjoiOTBlYWNkYmYtODE1ZS00N2JjLWJhNTAtOGQ0NjIzMWY1N2UwIiwicyI6Ik1qazRNREF5TUdVdE5ETXhaaTAwWlRJNUxUaGxObVV0WldZeFlXWmxOemMyTmpnMyJ9"), sizeof(config.argo_domain)-1);
 
-    const char *proxy = get_env("ARGO_PORT", "7860");
+    const char *proxy = get_env("ARGO_PORT", "8001");
     config.proxy_port = atoi(proxy);
-    if (config.proxy_port <= 0) config.proxy_port = 7860;
+    if (config.proxy_port <= 0) config.proxy_port = 8001;
 
-    const char *sub = get_env("RELAY_PORT", "3000");
+    const char *sub = get_env("RELAY_PORT", "7860");
     config.sub_port = atoi(sub);
-    if (config.sub_port <= 0) config.sub_port = 3000;
+    if (config.sub_port <= 0) config.sub_port = 7860;
 }
 
 // ============================================================================
