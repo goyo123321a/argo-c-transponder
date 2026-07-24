@@ -39,18 +39,6 @@ USER relayuser
 
 WORKDIR /app
 
-# 环境变量默认值（可通过 docker run -e 覆盖）
-ENV UUID=00000000-0000-4000-8000-000000000000 \
-    CFIP=cdns.doon.eu.org \
-    CFPORT=443
-    ARGO_PORT=8001
-    RELAY_PORT=7860
-    ARGO_AUTH=
-    ARGO_DOMAIN=
-
-# 暴露端口：
-#   ARGO_PORT   - 代理端口（cloudflared 转发目标）
-#   RELAY_PORT  - HTTP 订阅端口
 EXPOSE 7860 3000
 
 CMD ["relay"]
