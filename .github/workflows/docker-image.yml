@@ -1,4 +1,3 @@
-github构建amd64 / arm64两个版本可以吗
 name: Build and Push Docker Image
 
 on:
