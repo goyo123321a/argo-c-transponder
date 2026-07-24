@@ -17,8 +17,6 @@
 #include <time.h>
 #include <openssl/sha.h>
 #include <openssl/evp.h>
-#include <openssl/ssl.h>
-#include <openssl/err.h>
 
 // ============================================================================
 // 宏定义
@@ -27,17 +25,18 @@
 #define BUFFER_SIZE 8192
 
 // ============================================================================
-// 配置结构体与环境变量
+// 配置结构体（与 Go 版环境变量对齐）
 // ============================================================================
 typedef struct {
     char uuid[37];
     char cfip[64];
     char cfport[8];
-    int  proxy_port;      // VLESS/Trojan 代理端口（来自 ARGO_PORT）
-    int  sub_port;        // HTTP 订阅端口（来自 RELAY_PORT）
+    int  proxy_port;          // VLESS/Trojan 代理端口（来自 ARGO_PORT）
+    int  sub_port;            // HTTP 服务端口（来自 RELAY_PORT）
+    char sub_path[32];        // 订阅路径（来自 SUB_PATH，默认 "sub"）
     char argo_auth[2048];
     char argo_domain[256];
-    char node_name[64];
+    char node_name[64];       // 节点名称（来自 NAME）
 } RelayConfig;
 
 static RelayConfig config;
@@ -60,6 +59,8 @@ static void init_config() {
     config.argo_domain[sizeof(config.argo_domain)-1] = '\0';
     strncpy(config.node_name, get_env("NAME", "Argo"), sizeof(config.node_name)-1);
     config.node_name[sizeof(config.node_name)-1] = '\0';
+    strncpy(config.sub_path, get_env("SUB_PATH", "sub"), sizeof(config.sub_path)-1);
+    config.sub_path[sizeof(config.sub_path)-1] = '\0';
 
     const char *proxy = get_env("ARGO_PORT", "8001");
     config.proxy_port = atoi(proxy);
@@ -402,114 +403,7 @@ static void base64_encode(const unsigned char *input, int length, char *output) 
 }
 
 // ============================================================================
-// HTTPS 反向代理（获取伪装首页）
-// ============================================================================
-static int fetch_https(const char *host, const char *path, char **body, long *status) {
-    int sock = -1;
-    SSL_CTX *ctx = NULL;
-    SSL *ssl = NULL;
-    struct addrinfo hints, *res;
-    int ret = -1;
-
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    if (getaddrinfo(host, "443", &hints, &res) != 0) {
-        fprintf(stderr, "getaddrinfo failed for %s\n", host);
-        goto cleanup;
-    }
-    sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (sock < 0) { perror("socket"); goto cleanup; }
-    if (connect(sock, res->ai_addr, res->ai_addrlen) != 0) { perror("connect"); goto cleanup; }
-    freeaddrinfo(res); res = NULL;
-
-    SSL_library_init();
-    OpenSSL_add_all_algorithms();
-    SSL_load_error_strings();
-    ctx = SSL_CTX_new(TLS_client_method());
-    if (!ctx) { fprintf(stderr, "SSL_CTX_new failed\n"); goto cleanup; }
-    SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
-
-    ssl = SSL_new(ctx);
-    if (!ssl) { fprintf(stderr, "SSL_new failed\n"); goto cleanup; }
-    SSL_set_fd(ssl, sock);
-    if (SSL_connect(ssl) != 1) {
-        fprintf(stderr, "SSL_connect failed\n");
-        goto cleanup;
-    }
-
-    char req[512];
-    snprintf(req, sizeof(req),
-             "GET %s HTTP/1.1\r\n"
-             "Host: %s\r\n"
-             "Connection: close\r\n"
-             "User-Agent: Relay/1.0\r\n"
-             "\r\n",
-             path, host);
-    if (SSL_write(ssl, req, strlen(req)) <= 0) {
-        fprintf(stderr, "SSL_write failed\n");
-        goto cleanup;
-    }
-
-    char header[4096] = {0};
-    int header_len = 0;
-    char ch;
-    while (SSL_read(ssl, &ch, 1) > 0) {
-        header[header_len++] = ch;
-        if (header_len >= 4 && strstr(header, "\r\n\r\n")) break;
-        if (header_len >= sizeof(header)-1) break;
-    }
-    long code = 0;
-    if (sscanf(header, "HTTP/%*f %ld", &code) != 1) code = 500;
-    *status = code;
-
-    long content_length = -1;
-    char *cl = strstr(header, "Content-Length:");
-    if (cl) sscanf(cl, "Content-Length: %ld", &content_length);
-
-    if (content_length <= 0) {
-        char *buf = NULL;
-        long total = 0, cap = 4096;
-        buf = malloc(cap + 1);
-        if (!buf) goto cleanup;
-        while (1) {
-            if (total >= cap) {
-                cap *= 2;
-                char *newbuf = realloc(buf, cap + 1);
-                if (!newbuf) { free(buf); goto cleanup; }
-                buf = newbuf;
-            }
-            int n = SSL_read(ssl, buf + total, cap - total);
-            if (n <= 0) break;
-            total += n;
-        }
-        buf[total] = '\0';
-        *body = buf;
-        ret = 0;
-    } else {
-        char *buf = malloc(content_length + 1);
-        if (!buf) goto cleanup;
-        long total = 0;
-        while (total < content_length) {
-            int n = SSL_read(ssl, buf + total, content_length - total);
-            if (n <= 0) break;
-            total += n;
-        }
-        buf[total] = '\0';
-        *body = buf;
-        ret = 0;
-    }
-
-cleanup:
-    if (ssl) { SSL_shutdown(ssl); SSL_free(ssl); }
-    if (ctx) SSL_CTX_free(ctx);
-    if (sock >= 0) close(sock);
-    if (res) freeaddrinfo(res);
-    return ret;
-}
-
-// ============================================================================
-// HTTP 订阅服务与反向代理
+// HTTP 订阅服务与重定向
 // ============================================================================
 static void send_http_response(int client_fd, const char *content_type,
                                const char *body, size_t body_len) {
@@ -541,23 +435,47 @@ static void handle_sub_request(int client_fd) {
         return;
     }
 
-    // ----- 订阅服务（/sub）-----
-    if (strcmp(path, "/sub") == 0) {
-        FILE *f = fopen("sub.txt", "rb");
-        if (!f) {
-            const char *err = "sub.txt not found";
-            send_http_response(client_fd, "text/plain", err, strlen(err));
-            return;
-        }
-        fseek(f, 0, SEEK_END);
-        long len = ftell(f);
-        rewind(f);
-        char *body = malloc(len + 1);
-        if (!body) { fclose(f); close(client_fd); return; }
-        fread(body, 1, len, f);
-        fclose(f);
-        body[len] = '\0';
+    // 根路径：302 重定向到伪装首页
+    if (strcmp(path, "/") == 0) {
+        char *redirect_url = "https://doh.goyo123.work.gd/";
+        char header[512];
+        int header_len = snprintf(header, sizeof(header),
+            "HTTP/1.1 302 Found\r\n"
+            "Location: %s\r\n"
+            "Content-Length: 0\r\n"
+            "Connection: close\r\n"
+            "\r\n",
+            redirect_url);
+        send(client_fd, header, header_len, 0);
+        close(client_fd);
+        return;
+    }
 
+    // 订阅路径：动态匹配 config.sub_path
+    char sub_route[64];
+    snprintf(sub_route, sizeof(sub_route), "/%s", config.sub_path);
+    if (strcmp(path, sub_route) == 0) {
+        FILE *f = fopen("sub.txt", "rb");
+        char *body = NULL;
+        long len = 0;
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            len = ftell(f);
+            rewind(f);
+            body = malloc(len + 1);
+            if (body) {
+                fread(body, 1, len, f);
+                body[len] = '\0';
+            }
+            fclose(f);
+        }
+        // 若文件不存在或读取失败，body 为 NULL，len=0，将返回空 Base64
+        if (!body) {
+            body = strdup("");
+            len = 0;
+        }
+
+        // Base64 编码
         int b64_len = ((len + 2) / 3) * 4 + 1;
         char *b64 = malloc(b64_len);
         if (!b64) { free(body); close(client_fd); return; }
@@ -582,20 +500,6 @@ static void handle_sub_request(int client_fd) {
         close(client_fd);
         free(body);
         free(b64);
-        return;
-    }
-
-    // ----- 根路径：反向代理到伪装首页 -----
-    if (strcmp(path, "/") == 0) {
-        char *body = NULL;
-        long status = 0;
-        if (fetch_https("doh.goyo123.work.gd", "/", &body, &status) == 0 && status == 200) {
-            send_http_response(client_fd, "text/html", body, strlen(body));
-            free(body);
-        } else {
-            const char *err = "Backend error";
-            send_http_response(client_fd, "text/plain", err, strlen(err));
-        }
         return;
     }
 
@@ -840,6 +744,11 @@ static void generate_subscription(const char *domain) {
 static int argo_run() {
     if (config.argo_auth[0] && config.argo_domain[0]) {
         fprintf(stderr, "Using fixed tunnel: %s\n", config.argo_domain);
+        // 即使隧道配置或启动失败，也先生成订阅（因为域名已知）
+        strncpy(argo_domain, config.argo_domain, sizeof(argo_domain)-1);
+        argo_domain[sizeof(argo_domain)-1] = '\0';
+        generate_subscription(argo_domain);   // 先生成，确保文件存在
+
         if (generate_tunnel_config(config.argo_auth, config.argo_domain) != 0) {
             fprintf(stderr, "Failed to generate tunnel config\n");
             return -1;
@@ -848,9 +757,6 @@ static int argo_run() {
             fprintf(stderr, "Failed to start cloudflared\n");
             return -1;
         }
-        strncpy(argo_domain, config.argo_domain, sizeof(argo_domain)-1);
-        argo_domain[sizeof(argo_domain)-1] = '\0';
-        generate_subscription(argo_domain);
         return 0;
     }
 
@@ -958,8 +864,9 @@ int main(int argc, char **argv) {
     }
 
     printf("Proxy (VLESS/Trojan) listening on port %d\n", config.proxy_port);
-    printf("Subscription HTTP server on port %d (path /sub)\n", config.sub_port);
-    printf("Root path / proxies to https://doh.goyo123.work.gd\n");
+    printf("HTTP server on port %d\n", config.sub_port);
+    printf("  - /  -> 302 redirect to https://doh.goyo123.work.gd/\n");
+    printf("  - /%s -> Base64 encoded subscription\n", config.sub_path);
 
     struct epoll_event events[MAX_EVENTS];
     while (running) {
