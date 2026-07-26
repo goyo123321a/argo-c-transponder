@@ -27,7 +27,7 @@ static char g_uuid[UUID_LEN + 1] = "4a0636f4-4514-47f4-87f7-2f1967289758";
 static unsigned char g_uuid_bin[16];
 static char g_trojan_password[57];
 static char g_argo_domain[256] = "gocfvps.rboya.indevs.in";
-static int g_port = 8001;
+static int g_port = 7860;
 static char g_name[64] = "C";
 static char g_argo_auth[2048] = "eyJhIjoiNWRmNTFlZjhhMTNiMWQ1ZDFhODhhZTAxNWFmYTU5OGIiLCJ0IjoiOTBlYWNkYmYtODE1ZS00N2JjLWJhNTAtOGQ0NjIzMWY1N2UwIiwicyI6Ik1qazRNREF5TUdVdE5ETXhaaTAwWlRJNUxUaGxObVV0WldZeFlXWmxOemMyTmpnMyJ9";   // 扩大缓冲区，容纳长 Token
 static char g_cloudflared_path[256] = CLOUDFLARED_PATH_DEFAULT;
