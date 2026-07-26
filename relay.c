@@ -13,7 +13,7 @@
 #include <signal.h>
 #include <sys/wait.h>
 #include <openssl/sha.h>
-#include <openssl/evp.h>  // 用于 base64 编码
+#include <openssl/evp.h>
 
 // ============================================================
 // 配置常量
@@ -637,8 +637,8 @@ static void start_cloudflared(void) {
             dup2(devnull, STDERR_FILENO);
             close(devnull);
         }
-        // 设置子进程在父进程退出时自动终止（容器环境）
-        prctl(PR_SET_PDEATHSIG, SIGTERM);
+        // 注意：在容器环境中，父进程退出时整个容器会停止，子进程也会被终止。
+        // 因此不需要额外设置 PR_SET_PDEATHSIG。
         execvp(args[0], args);
         perror("execvp cloudflared");
         exit(1);
