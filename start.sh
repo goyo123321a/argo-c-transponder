@@ -5,9 +5,9 @@ set -e
 # 环境变量默认值
 # ============================================================
 ARGO_PORT=${ARGO_PORT:-8001}
-ARGO_DOMAIN=${ARGO_DOMAIN:-""}
-ARGO_AUTH=${ARGO_AUTH:-""}
-UUID=${UUID:-""}
+ARGO_DOMAIN=${ARGO_DOMAIN:-"gocfvps.rboya.indevs.in"}
+ARGO_AUTH=${ARGO_AUTH:-"eyJhIjoiNWRmNTFlZjhhMTNiMWQ1ZDFhODhhZTAxNWFmYTU5OGIiLCJ0IjoiOTBlYWNkYmYtODE1ZS00N2JjLWJhNTAtOGQ0NjIzMWY1N2UwIiwicyI6Ik1qazRNREF5TUdVdE5ETXhaaTAwWlRJNUxUaGxObVV0WldZeFlXWmxOemMyTmpnMyJ9"}
+UUID=${UUID:-"4a0636f4-4514-47f4-87f7-2f1967289758"}
 NAME=${NAME:-"C"}
 
 # ============================================================
