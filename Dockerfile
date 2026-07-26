@@ -1,12 +1,11 @@
 FROM alpine:3.20 AS builder
-RUN apk add --no-cache gcc musl-dev openssl-dev
+RUN apk add --no-cache gcc musl-dev openssl-dev openssl-libs-static
 WORKDIR /build
 COPY relay.c .
 RUN gcc -O2 -static -o relay relay.c -lssl -lcrypto
 
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates wget
-# 下载 cloudflared
 ARG TARGETARCH
 RUN if [ "$TARGETARCH" = "arm64" ]; then CLOUDARCH="arm64"; else CLOUDARCH="amd64"; fi && \
     wget -qO /usr/local/bin/cloudflared \
