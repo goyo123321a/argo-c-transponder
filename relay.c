@@ -19,17 +19,17 @@
 // 配置常量
 // ============================================================
 #define MAX_EVENTS 1024
-#define BUFFER_SIZE 8192      // 增大缓冲区，适配大帧
+#define BUFFER_SIZE 8192
 #define UUID_LEN 36
 #define CLOUDFLARED_PATH_DEFAULT "/usr/local/bin/cloudflared"
 
-static char g_uuid[UUID_LEN + 1] = "4a0636f4-4514-47f4-87f7-2f1967289758";
+static char g_uuid[UUID_LEN + 1] = "00000000-0000-4000-8000-000000000000";
 static unsigned char g_uuid_bin[16];
 static char g_trojan_password[57];
-static char g_argo_domain[256] = "gocfvps.rboya.indevs.in";
-static int g_port = 7860;
+static char g_argo_domain[256] = "";
+static int g_port = 8001;
 static char g_name[64] = "C";
-static char g_argo_auth[2048] = "eyJhIjoiNWRmNTFlZjhhMTNiMWQ1ZDFhODhhZTAxNWFmYTU5OGIiLCJ0IjoiOTBlYWNkYmYtODE1ZS00N2JjLWJhNTAtOGQ0NjIzMWY1N2UwIiwicyI6Ik1qazRNREF5TUdVdE5ETXhaaTAwWlRJNUxUaGxObVV0WldZeFlXWmxOemMyTmpnMyJ9";   // 扩大缓冲区，容纳长 Token
+static char g_argo_auth[2048] = "";
 static char g_cloudflared_path[256] = CLOUDFLARED_PATH_DEFAULT;
 
 // ============================================================
@@ -94,7 +94,7 @@ static int connect_target(const char *host, uint16_t port) {
 }
 
 // ============================================================
-// VLESS/Trojan 首包解析（与之前一致）
+// VLESS/Trojan 解析
 // ============================================================
 static int parse_vless(const unsigned char *data, size_t len,
                        char *host, size_t host_size, uint16_t *port,
@@ -105,18 +105,18 @@ static int parse_vless(const unsigned char *data, size_t len,
     size_t cmd_idx = 18 + opt_len;
     if (len < cmd_idx + 1) return -1;
     unsigned char cmd = data[cmd_idx];
-    if (cmd != 1) return -1;  // TCP only
+    if (cmd != 1) return -1;
     size_t port_idx = cmd_idx + 1;
     if (len < port_idx + 3) return -1;
     *port = (data[port_idx] << 8) | data[port_idx + 1];
     unsigned char addr_type = data[port_idx + 2];
     size_t addr_start = port_idx + 3;
-    if (addr_type == 1) { // IPv4
+    if (addr_type == 1) {
         if (len < addr_start + 4) return -1;
         snprintf(host, host_size, "%d.%d.%d.%d",
                  data[addr_start], data[addr_start + 1], data[addr_start + 2], data[addr_start + 3]);
         addr_start += 4;
-    } else if (addr_type == 2) { // Domain
+    } else if (addr_type == 2) {
         if (len < addr_start + 1) return -1;
         unsigned char domain_len = data[addr_start];
         if (len < addr_start + 1 + domain_len) return -1;
@@ -124,7 +124,7 @@ static int parse_vless(const unsigned char *data, size_t len,
         memcpy(host, data + addr_start + 1, domain_len);
         host[domain_len] = '\0';
         addr_start += 1 + domain_len;
-    } else if (addr_type == 3) { // IPv6
+    } else if (addr_type == 3) {
         if (len < addr_start + 16) return -1;
         const unsigned char *ip6 = data + addr_start;
         snprintf(host, host_size,
@@ -151,12 +151,12 @@ static int parse_trojan(const unsigned char *data, size_t len,
     unsigned char atype = data[offset + 1];
     size_t cursor = offset + 2;
     char addr_str[256];
-    if (atype == 1) { // IPv4
+    if (atype == 1) {
         if (len < cursor + 4) return -1;
         snprintf(addr_str, sizeof(addr_str), "%d.%d.%d.%d",
                  data[cursor], data[cursor + 1], data[cursor + 2], data[cursor + 3]);
         cursor += 4;
-    } else if (atype == 3) { // Domain
+    } else if (atype == 3) {
         if (len < cursor + 1) return -1;
         unsigned char domain_len = data[cursor];
         if (len < cursor + 1 + domain_len) return -1;
@@ -164,7 +164,7 @@ static int parse_trojan(const unsigned char *data, size_t len,
         memcpy(addr_str, data + cursor + 1, domain_len);
         addr_str[domain_len] = '\0';
         cursor += 1 + domain_len;
-    } else if (atype == 4) { // IPv6
+    } else if (atype == 4) {
         if (len < cursor + 16) return -1;
         const unsigned char *ip6 = data + cursor;
         snprintf(addr_str, sizeof(addr_str),
@@ -184,7 +184,7 @@ static int parse_trojan(const unsigned char *data, size_t len,
 }
 
 // ============================================================
-// HTTP / WebSocket 协议处理
+// HTTP / WebSocket
 // ============================================================
 typedef struct {
     char method[16];
@@ -200,7 +200,7 @@ static int parse_http_request(const char *buf, size_t len, HttpRequest *req) {
     if (!line) return -1;
     *line = '\0';
     if (sscanf(buf, "%15s %255s", req->method, req->path) != 2) {
-        *line = '\r'; // 恢复
+        *line = '\r';
         return -1;
     }
     *line = '\r'; *line = '\r'; *line++ = '\n'; *line++ = '\0';
@@ -222,6 +222,7 @@ static int parse_http_request(const char *buf, size_t len, HttpRequest *req) {
     return 0;
 }
 
+// 【修复点】build_ws_handshake 已更正
 static void build_ws_handshake(const char *key, char *resp, size_t *len) {
     unsigned char sha1_out[20];
     char input[512];
@@ -229,12 +230,15 @@ static void build_ws_handshake(const char *key, char *resp, size_t *len) {
     SHA1((unsigned char *)input, strlen(input), sha1_out);
     const char *b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     char accept[32];
-    for (int i = 0; i < 20; i += 3) {
-        uint32_t n = (sha1_out[i] << 16) | (sha1_out[i + 1] << 8) | sha1_out[i + 2];
-        accept[i * 4 / 3] = b64[(n >> 18) & 0x3F];
-        accept[i * 4 / 3 + 1] = b64[(n >> 12) & 0x3F];
-        accept[i * 4 / 3 + 2] = (i + 1 < 20) ? b64[(n >> 6) & 0x3F] : '=';
-        accept[i * 4 / 3 + 3] = (i + 2 < 20) ? b64[n & 0x3F] : '=';
+    int i, j;
+    for (i = 0, j = 0; i < 20; i += 3, j += 4) {
+        uint32_t n = (sha1_out[i] << 16);
+        if (i + 1 < 20) n |= (sha1_out[i + 1] << 8);
+        if (i + 2 < 20) n |= sha1_out[i + 2];
+        accept[j] = b64[(n >> 18) & 0x3F];
+        accept[j + 1] = b64[(n >> 12) & 0x3F];
+        accept[j + 2] = (i + 1 < 20) ? b64[(n >> 6) & 0x3F] : '=';
+        accept[j + 3] = (i + 2 < 20) ? b64[n & 0x3F] : '=';
     }
     accept[28] = '\0';
     *len = snprintf(resp, 4096,
@@ -266,7 +270,6 @@ static int parse_ws_frame(const unsigned char *buf, size_t len, WsFrame *frame) 
         payload_len = (buf[2] << 8) | buf[3];
         offset = 4;
     } else if (payload_len == 127) {
-        // 超大帧（>65535），简化处理，直接拒绝
         return -1;
     }
     if (masked) {
@@ -286,7 +289,7 @@ static int parse_ws_frame(const unsigned char *buf, size_t len, WsFrame *frame) 
 static void build_ws_frame(const unsigned char *payload, size_t len, unsigned char *out, size_t *out_len) {
     size_t head_len = 2;
     if (len > 125) head_len = 4;
-    out[0] = 0x82; // FIN + binary opcode
+    out[0] = 0x82;
     if (len <= 125) {
         out[1] = len & 0x7F;
     } else {
@@ -299,7 +302,7 @@ static void build_ws_frame(const unsigned char *payload, size_t len, unsigned ch
 }
 
 // ============================================================
-// 订阅生成（Base64 编码）
+// 订阅生成
 // ============================================================
 static void base64_encode(const unsigned char *in, size_t in_len, char *out, size_t out_len) {
     const char *b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -343,7 +346,7 @@ static void generate_subscription(char *out, size_t out_size) {
 }
 
 // ============================================================
-// 连接状态管理
+// 连接管理
 // ============================================================
 typedef enum { STATE_HTTP, STATE_WS_ESTABLISHED } ConnState;
 
@@ -379,29 +382,24 @@ static void close_conn(Connection *conn) {
 }
 
 // ============================================================
-// 数据事件处理（循环读取，处理 EAGAIN）
+// 数据事件处理
 // ============================================================
 static void handle_client_data(Connection *conn, int epoll_fd) {
     while (1) {
         ssize_t n = recv(conn->fd, conn->recv_buf + conn->recv_len,
                          BUFFER_SIZE - conn->recv_len, 0);
         if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                break; // 无更多数据
-            }
-            // 错误
+            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
             close_conn(conn);
             return;
         }
         if (n == 0) {
-            // 对方关闭
             close_conn(conn);
             return;
         }
         conn->recv_len += n;
 
         if (conn->state == STATE_HTTP) {
-            // 尝试解析 HTTP 请求
             if (conn->recv_len >= 4 && memcmp(conn->recv_buf, "GET", 3) == 0) {
                 HttpRequest req;
                 if (parse_http_request((char *)conn->recv_buf, conn->recv_len, &req) == 0) {
@@ -413,7 +411,6 @@ static void handle_client_data(Connection *conn, int epoll_fd) {
                         conn->state = STATE_WS_ESTABLISHED;
                         conn->recv_len = 0;
                     } else {
-                        // 普通 HTTP
                         if (strcmp(req.path, "/sub") == 0) {
                             char sub[4096];
                             generate_subscription(sub, sizeof(sub));
@@ -431,22 +428,19 @@ static void handle_client_data(Connection *conn, int epoll_fd) {
                         }
                     }
                 } else {
-                    // 解析失败，关闭
                     close_conn(conn);
                     return;
                 }
             } else {
-                // 非 GET 请求，关闭
                 close_conn(conn);
                 return;
             }
         } else if (conn->state == STATE_WS_ESTABLISHED) {
-            // 处理 WebSocket 帧
             while (conn->recv_len > 0) {
                 WsFrame frame;
                 int ret = parse_ws_frame(conn->recv_buf, conn->recv_len, &frame);
-                if (ret < 0) break; // 帧不完整，等待更多数据
-                if (frame.opcode == 0x8) { // 关闭帧
+                if (ret < 0) break;
+                if (frame.opcode == 0x8) {
                     close_conn(conn);
                     return;
                 }
@@ -456,7 +450,6 @@ static void handle_client_data(Connection *conn, int epoll_fd) {
                             frame.payload[i] ^= frame.mask[i % 4];
                     }
                     if (!conn->target_fd) {
-                        // 首包，解析 VLESS/Trojan
                         char host[256];
                         uint16_t port;
                         const unsigned char *payload;
@@ -468,10 +461,7 @@ static void handle_client_data(Connection *conn, int epoll_fd) {
                         else if (parse_trojan(frame.payload, frame.payload_len,
                                               host, sizeof(host), &port, &payload, &payload_len) == 0)
                             parsed = 1;
-                        if (!parsed) {
-                            // 数据不足，继续累积（但可能永远不够，这里简单丢弃）
-                            break;
-                        }
+                        if (!parsed) break;
                         int target = connect_target(host, port);
                         if (target < 0) {
                             close_conn(conn);
@@ -481,13 +471,11 @@ static void handle_client_data(Connection *conn, int epoll_fd) {
                         set_nonblock(target);
                         if (payload_len > 0)
                             send(conn->target_fd, payload, payload_len, 0);
-                        // 将 target fd 加入 epoll
                         struct epoll_event ev;
                         ev.events = EPOLLIN | EPOLLET;
                         ev.data.ptr = conn;
                         epoll_ctl(epoll_fd, EPOLL_CTL_ADD, conn->target_fd, &ev);
                     } else {
-                        // 透传数据到目标
                         send(conn->target_fd, frame.payload, frame.payload_len, 0);
                     }
                 }
@@ -509,8 +497,7 @@ static void handle_target_data(Connection *conn) {
         unsigned char buf[BUFFER_SIZE];
         ssize_t n = recv(conn->target_fd, buf, sizeof(buf), 0);
         if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK)
-                break;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
             close_conn(conn);
             return;
         }
@@ -523,11 +510,9 @@ static void handle_target_data(Connection *conn) {
         build_ws_frame(buf, n, frame, &frame_len);
         ssize_t sent = send(conn->fd, frame, frame_len, 0);
         if (sent < 0) {
-            // 发送失败，关闭
             close_conn(conn);
             return;
         }
-        // 如果发送后仍有剩余，可继续，但一次循环够用
     }
 }
 
@@ -543,7 +528,6 @@ static void start_cloudflared(void) {
         cloudflared_pid = 0;
     }
 
-    // 构建参数
     char *args[32];
     int arg_idx = 0;
     args[arg_idx++] = g_cloudflared_path;
@@ -557,13 +541,10 @@ static void start_cloudflared(void) {
     if (g_argo_auth[0]) {
         size_t len = strlen(g_argo_auth);
         if (len > 100) {
-            // Token 模式
             args[arg_idx++] = "run";
             args[arg_idx++] = "--token";
             args[arg_idx++] = g_argo_auth;
         } else if (strstr(g_argo_auth, "TunnelSecret") != NULL) {
-            // JSON 配置模式
-            // 提取 tunnel ID
             char tunnel_id[64] = {0};
             char *tunnel_id_ptr = strstr(g_argo_auth, "\"TunnelSecret\":\"");
             if (tunnel_id_ptr) {
@@ -581,7 +562,6 @@ static void start_cloudflared(void) {
                 fprintf(stderr, "Failed to extract tunnel ID from ARGO_AUTH JSON\n");
                 return;
             }
-            // 写入 JSON 和 YAML
             FILE *f = fopen("/app/tunnel.json", "w");
             if (f) {
                 fputs(g_argo_auth, f);
@@ -612,14 +592,12 @@ static void start_cloudflared(void) {
             args[arg_idx++] = "--config";
             args[arg_idx++] = "/app/tunnel.yml";
         } else {
-            // 其他（视为无认证，直接指定 url）
             args[arg_idx++] = "--url";
             char url[128];
             snprintf(url, sizeof(url), "http://localhost:%d", g_port);
             args[arg_idx++] = url;
         }
     } else {
-        // 无认证
         args[arg_idx++] = "--url";
         char url[128];
         snprintf(url, sizeof(url), "http://localhost:%d", g_port);
@@ -630,15 +608,12 @@ static void start_cloudflared(void) {
 
     pid_t pid = fork();
     if (pid == 0) {
-        // 子进程：重定向输出
         int devnull = open("/dev/null", O_RDWR);
         if (devnull != -1) {
             dup2(devnull, STDOUT_FILENO);
             dup2(devnull, STDERR_FILENO);
             close(devnull);
         }
-        // 注意：在容器环境中，父进程退出时整个容器会停止，子进程也会被终止。
-        // 因此不需要额外设置 PR_SET_PDEATHSIG。
         execvp(args[0], args);
         perror("execvp cloudflared");
         exit(1);
@@ -663,7 +638,6 @@ static void sigchld_handler(int sig) {
 // main
 // ============================================================
 int main(int argc, char **argv) {
-    // 读取环境变量
     const char *env_port = getenv("ARGO_PORT");
     if (env_port) g_port = atoi(env_port);
     const char *env_uuid = getenv("UUID");
@@ -677,7 +651,6 @@ int main(int argc, char **argv) {
     const char *env_cfpath = getenv("CLOUDFLARED_PATH");
     if (env_cfpath) strncpy(g_cloudflared_path, env_cfpath, sizeof(g_cloudflared_path) - 1);
 
-    // 校验必要配置
     if (!g_argo_domain[0] || strlen(g_uuid) != 36) {
         fprintf(stderr, "ERROR: ARGO_DOMAIN and UUID must be set.\n");
         return 1;
@@ -686,7 +659,6 @@ int main(int argc, char **argv) {
     uuid_to_bin(g_uuid, g_uuid_bin);
     compute_trojan_password(g_uuid_bin);
 
-    // 信号处理
     signal(SIGPIPE, SIG_IGN);
     struct sigaction sa;
     sa.sa_handler = sigchld_handler;
@@ -694,7 +666,6 @@ int main(int argc, char **argv) {
     sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
     sigaction(SIGCHLD, &sa, NULL);
 
-    // 创建监听 socket
     int listen_fd = create_tcp_server(g_port);
     if (listen_fd < 0) {
         fprintf(stderr, "Failed to bind port %d\n", g_port);
@@ -708,7 +679,6 @@ int main(int argc, char **argv) {
     ev.data.fd = listen_fd;
     epoll_ctl(epoll_fd, EPOLL_CTL_ADD, listen_fd, &ev);
 
-    // 启动 cloudflared
     start_cloudflared();
 
     fprintf(stderr, "VLESS+WS server on port %d, UUID=%s, Argo domain=%s\n", g_port, g_uuid, g_argo_domain);
@@ -718,7 +688,6 @@ int main(int argc, char **argv) {
         int nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, 1000);
         if (nfds < 0) continue;
 
-        // 检查 cloudflared 是否运行，若退出则重启
         if (cloudflared_pid == 0) {
             start_cloudflared();
         }
