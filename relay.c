@@ -16,9 +16,18 @@
 #include <openssl/sha.h>
 #include <openssl/evp.h>
 
-// ============================================================
-// 配置
-// ============================================================
+// ---------- 兼容性定义 ----------
+#ifndef LWS_CLOSE_STATUS_ABNORMAL
+#define LWS_CLOSE_STATUS_ABNORMAL 1006
+#endif
+#ifndef LWS_CALLBACK_WRITEABLE
+#define LWS_CALLBACK_WRITEABLE LWS_CALLBACK_RAW_WRITEABLE
+#endif
+#ifndef LWS_CLOSE_STATUS_POLICY_VIOLATION
+#define LWS_CLOSE_STATUS_POLICY_VIOLATION 1008
+#endif
+
+// ---------- 配置 ----------
 typedef struct {
     int port;
     char uuid[37];
@@ -64,9 +73,7 @@ static int validate_config(void) {
     return 1;
 }
 
-// ============================================================
-// 加密准备
-// ============================================================
+// ---------- 加密 ----------
 static unsigned char g_uuid_bin[16];
 static char g_trojan_password[57];
 
@@ -85,9 +92,7 @@ static void prepare_crypto(void) {
     g_trojan_password[56] = '\0';
 }
 
-// ============================================================
-// VLESS 首包解析
-// ============================================================
+// ---------- VLESS 解析 ----------
 static int parse_vless(const unsigned char *data, size_t len,
                        char *host, size_t host_size, uint16_t *port,
                        const unsigned char **payload, size_t *payload_len) {
@@ -130,9 +135,7 @@ static int parse_vless(const unsigned char *data, size_t len,
     return 0;
 }
 
-// ============================================================
-// Trojan 首包解析
-// ============================================================
+// ---------- Trojan 解析 ----------
 static int parse_trojan(const unsigned char *data, size_t len,
                         char *host, size_t host_size, uint16_t *port,
                         const unsigned char **payload, size_t *payload_len) {
@@ -178,9 +181,7 @@ static int parse_trojan(const unsigned char *data, size_t len,
     return 0;
 }
 
-// ============================================================
-// 工具函数
-// ============================================================
+// ---------- 工具 ----------
 static void set_nonblock(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags != -1) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
@@ -206,9 +207,7 @@ static int connect_target(const char *host, uint16_t port) {
     return (p == NULL) ? -1 : sock;
 }
 
-// ============================================================
-// 会话管理
-// ============================================================
+// ---------- 会话 ----------
 struct per_session_data {
     int target_fd;
     int is_first;
@@ -216,16 +215,13 @@ struct per_session_data {
     size_t buf_len;
     struct lws *wsi;
 };
-
 #define MAX_SESSIONS 1024
 static struct per_session_data *all_sessions[MAX_SESSIONS];
 static int session_count = 0;
-
 static void add_session(struct per_session_data *pss) {
     if (session_count < MAX_SESSIONS)
         all_sessions[session_count++] = pss;
 }
-
 static void remove_session(struct per_session_data *pss) {
     for (int i = 0; i < session_count; i++) {
         if (all_sessions[i] == pss) {
@@ -235,9 +231,6 @@ static void remove_session(struct per_session_data *pss) {
     }
 }
 
-// ============================================================
-// 数据转发
-// ============================================================
 static void send_to_target(struct per_session_data *pss, const unsigned char *data, size_t len) {
     if (pss->target_fd < 0) return;
     ssize_t sent = send(pss->target_fd, data, len, MSG_NOSIGNAL);
@@ -267,9 +260,7 @@ static void read_from_target(struct per_session_data *pss) {
     }
 }
 
-// ============================================================
-// 订阅生成
-// ============================================================
+// ---------- 订阅生成 ----------
 static void generate_subscription(char *out, size_t out_size) {
     if (g_config.argo_domain[0] == '\0') {
         snprintf(out, out_size, "ERROR: ARGO_DOMAIN not set");
@@ -289,7 +280,7 @@ static void generate_subscription(char *out, size_t out_size) {
              "{\"v\":\"2\",\"ps\":\"%s_VMess\",\"add\":\"%s\",\"port\":443,\"id\":\"%s\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"%s\",\"path\":\"/vless-argo?ed=2560\",\"tls\":\"tls\",\"sni\":\"%s\",\"fp\":\"firefox\"}",
              node_prefix, g_config.argo_domain, g_config.uuid, g_config.argo_domain, g_config.argo_domain);
 
-    // Base64 编码 vmess_json
+    // Base64 vmess_json
     BIO *b64, *bio;
     BUF_MEM *bptr;
     b64 = BIO_new(BIO_f_base64());
@@ -307,8 +298,7 @@ static void generate_subscription(char *out, size_t out_size) {
 
     char plain[2048];
     snprintf(plain, sizeof(plain), "%s\n%s\n%s\n", vless, trojan, vmess);
-
-    // Base64 整个订阅
+    // Base64 all
     BIO *b64_all, *bio_all;
     BUF_MEM *bptr_all;
     b64_all = BIO_new(BIO_f_base64());
@@ -328,14 +318,23 @@ static void generate_subscription(char *out, size_t out_size) {
     BIO_free_all(b64_all);
 }
 
-// ============================================================
-// HTTP 回调
-// ============================================================
+// ---------- 获取请求路径 ----------
+static const char* get_request_path(struct lws *wsi, char *buf, size_t len) {
+    if (lws_hdr_total_length(wsi, LWS_HDR_URI) > 0) {
+        if (lws_hdr_copy(wsi, buf, len, LWS_HDR_URI) > 0) {
+            return buf;
+        }
+    }
+    return "/";
+}
+
+// ---------- HTTP 回调 ----------
 static int callback_http(struct lws *wsi, enum lws_callback_reasons reason,
                          void *user, void *in, size_t len) {
     switch (reason) {
         case LWS_CALLBACK_HTTP: {
-            const char *uri = lws_get_url_path_start(wsi);
+            char uri_buf[256];
+            const char *uri = get_request_path(wsi, uri_buf, sizeof(uri_buf));
             if (strcmp(uri, "/sub") == 0) {
                 char sub_buf[4096];
                 generate_subscription(sub_buf, sizeof(sub_buf));
@@ -352,16 +351,14 @@ static int callback_http(struct lws *wsi, enum lws_callback_reasons reason,
     return 0;
 }
 
-// ============================================================
-// WebSocket 回调（含路径校验）
-// ============================================================
+// ---------- WebSocket 回调 ----------
 static int callback_vless_ws(struct lws *wsi, enum lws_callback_reasons reason,
                              void *user, void *in, size_t len) {
     struct per_session_data *pss = (struct per_session_data *)user;
     switch (reason) {
         case LWS_CALLBACK_ESTABLISHED: {
-            // 只接受特定路径
-            const char *uri = lws_get_url_path_start(wsi);
+            char uri_buf[256];
+            const char *uri = get_request_path(wsi, uri_buf, sizeof(uri_buf));
             if (strcmp(uri, "/vless-argo") != 0 && strcmp(uri, "/trojan-argo") != 0) {
                 lws_close_reason(wsi, LWS_CLOSE_STATUS_POLICY_VIOLATION, NULL, 0);
                 return -1;
@@ -430,23 +427,17 @@ static int callback_vless_ws(struct lws *wsi, enum lws_callback_reasons reason,
     return 0;
 }
 
-// ============================================================
-// 协议数组
-// ============================================================
+// ---------- 协议 ----------
 static struct lws_protocols protocols[] = {
     { "http", callback_http, 0, 0 },
     { "vless-ws", callback_vless_ws, sizeof(struct per_session_data), 8192 },
     { NULL, NULL, 0, 0 }
 };
 
-// ============================================================
-// 主循环（含 poll 检查目标 fd）
-// ============================================================
+// ---------- 主循环 ----------
 static void service_loop(struct lws_context *context) {
     while (1) {
         lws_service(context, 50);
-
-        // 轮询所有会话的目标 fd，若有数据则触发写回调
         if (session_count > 0) {
             struct pollfd fds[MAX_SESSIONS];
             struct per_session_data *sessions[MAX_SESSIONS];
@@ -473,9 +464,7 @@ static void service_loop(struct lws_context *context) {
     }
 }
 
-// ============================================================
-// main
-// ============================================================
+// ---------- main ----------
 int main(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN);
 
