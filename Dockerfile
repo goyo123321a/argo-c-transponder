@@ -16,5 +16,5 @@ COPY --from=builder /build/relay /usr/local/bin/relay
 RUN adduser -D -u 1000 relayuser
 USER relayuser
 WORKDIR /app
-EXPOSE 8001
+EXPOSE 7860
 CMD ["/usr/local/bin/relay"]
