@@ -1,19 +1,20 @@
 FROM alpine:3.20 AS builder
-RUN apk add --no-cache gcc musl-dev openssl-dev openssl-libs-static libwebsockets-dev
+RUN apk add --no-cache gcc musl-dev openssl-dev
 WORKDIR /build
 COPY relay.c .
-# 使用动态链接，因为 libwebsockets 是动态库
-RUN gcc -O2 -Wall -o relay relay.c -lwebsockets -lssl -lcrypto
+RUN gcc -O2 -static -o relay relay.c -lssl -lcrypto
 
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates bash wget libwebsockets
+RUN apk add --no-cache ca-certificates wget
+# 下载 cloudflared
+ARG TARGETARCH
+RUN if [ "$TARGETARCH" = "arm64" ]; then CLOUDARCH="arm64"; else CLOUDARCH="amd64"; fi && \
+    wget -qO /usr/local/bin/cloudflared \
+    "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CLOUDARCH}" && \
+    chmod +x /usr/local/bin/cloudflared
 COPY --from=builder /build/relay /usr/local/bin/relay
-COPY start.sh /start.sh
-RUN chmod +x /start.sh
-
 RUN adduser -D -u 1000 relayuser
 USER relayuser
 WORKDIR /app
-
-EXPOSE 7860
-CMD ["/start.sh"]
+EXPOSE 8001
+CMD ["/usr/local/bin/relay"]
